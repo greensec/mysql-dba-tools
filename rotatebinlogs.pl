@@ -45,6 +45,8 @@ my $purge_free_space_threshold = 200; #in MB
 my $keep;
 my $uncompressed_keep = 24;
 my $uncompressed_free_space_threshold = 100; #in MB
+my $compressor = "gzip";
+my $compressor_suffix = 'gz';
 
 my $result = GetOptions(
   "user=s" => \$user,
@@ -61,6 +63,8 @@ my $result = GetOptions(
   "uncompressed_keep=f" => \$uncompressed_keep,
   "uncompressed_free_space_threshold=f" => \$uncompressed_free_space_threshold,
   "prefix=s" => \$prefix,
+  "compressor=s" => \$compressor,
+  "compressor_suffix=s" => \$compressor_suffix
 );
 
 if (!$numslaves || !$keep || $keep < 1 || !$prefix) {
@@ -76,7 +80,7 @@ sub usage {
 Usage: $me <options>
 
 Options:
-  --user=<username> 
+  --user=<username>
 
     The username to use when connecting to the DB server
 
@@ -105,7 +109,7 @@ Options:
     The scheduling priority to use.  1-20 makes it schedule less often meaning it's nicer, -1 to -20 makes it schedule more often, meaning it will use resources more aggresively. Defaults to 19.
 
   --purge
-    
+
     Purge the master logs when done. Be mindful of using this if you're not running this script often.
 
   --purge_free_space_threshold=<total_space_in_MB>
@@ -113,7 +117,7 @@ Options:
     It purges the archived logs when there is less then specified disk space avaiable. It's enabled only when --purge option is specified. The default is 200MB.
 
   --keep=<days>
- 
+
     The number of days worth of compressed logs to keep around. The archived logs can be purged when there is not enough space available. See --purge_free_space_threshold.
 
   --uncompressed_keep=<hours>
@@ -124,6 +128,14 @@ Options:
   --uncompressed_free_space_threshold=<total_space_in_MB>
 
     See --uncompressed_keep=<hours>. The default is 100MB.
+
+  --compressor=<command>
+
+    Use compressor instead of gzip for compression
+
+  --compressor_suffix=<suffix>
+
+    Override default compressor suffix "gz" by given suffix
 
   --prefix=<prefix>
 
@@ -151,7 +163,7 @@ for (my $retries = 0; $retries < 10; $retries++) {
     $slaves{$_->{'Host'}} = $_->{'State'} if ($_->{'Command'} eq 'Binlog Dump');
   }
   foreach my $slave (keys %slaves) {
-    if ($slaves{$slave} != 'Master has sent all binlog to slave; waiting for binlog to be updated') {      
+    if ($slaves{$slave} != 'Master has sent all binlog to slave; waiting for binlog to be updated') {
       $skip = 1;
     }
   }
@@ -167,11 +179,18 @@ for (my $retries = 0; $retries < 10; $retries++) {
   foreach my $file (@{$files}) {
     last if ($file->{'Log_name'} eq $status->{'File'});
     my $f = $datadir . '/' . $file->{'Log_name'};
-    next if (!-e $f || -e "$f.gz");
+    next if (!-e $f || -e "$f." . $compressor_suffix);
     print "Compressing $f\n";
-    gzip($f => "$f.gz",-Level=> Z_BEST_SPEED) || die("Error compression file $f: $GzipError\n");
+    if ($compressor =~ /^gzip$/i) {
+        gzip($f => "$f.gz",-Level=> Z_BEST_SPEED) || die("Error compression file $f: $GzipError\n");
+    } else {
+        system($compressor . " " . $f);
+        if ($? == -1) {
+            die("Error compression file $f: $!\n");
+        }
+    }
     my  ($atime, $mtime) = (stat($f))[8,9];
-    utime($atime,$mtime,"$f.gz");
+    utime($atime,$mtime,"$f.$compressor_suffix");
     if ($purge) {
       print "Purging to $f\n";
       $dbh->do("PURGE BINARY LOGS TO ?",undef,$file->{'Log_name'});
@@ -183,7 +202,7 @@ for (my $retries = 0; $retries < 10; $retries++) {
 if ($purge) {
   my $keeptime = time() - (86400*$keep);
   opendir(D,$datadir) || die ("couldn't open data dir: $!");
-  my @files = map { $_->[0] } sort { $a->[1] <=> $b->[1] } map { [$_, /\.(\d+)\.gz$/] } grep {/^$prefix\.\d+\.gz$/} readdir(D);
+  my @files = map { $_->[0] } sort { $a->[1] <=> $b->[1] } map { [$_, /\.(\d+)\.$compressor_suffix$/] } grep {/^$prefix\.\d+\.$compressor_suffix$/} readdir(D);
   closedir(D);
   foreach my $file (@files) {
     my $mtime = (stat("$datadir/$file"))[9];
